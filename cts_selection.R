@@ -981,3 +981,118 @@ ggplot(data = metadata_b, aes(x = type, y = tumor_largest_dimension_diameter, fi
 grupo_negative <- metadata_b$tumor_largest_dimension_diameter[metadata_b$type == "Negative"]
 grupo_positive <-  metadata_b$tumor_largest_dimension_diameter[metadata_b$type == "Positive"]
 t.test(grupo_negative, grupo_positive)
+
+##### Part 5: Analysis Single-Cell method MuSiC
+library(Biobase)
+library(SingleCellExperiment)
+library(SeuratObject)
+library(loomR)
+library(Seurat)
+library(MuSiC)
+library(dplyr)
+library(ggplot2)
+
+# Construct "ExpressionSet" file
+metadata_ptafr <- read.delim("~/Library/CloudStorage/GoogleDrive-barbdalmaso@gmail.com/Meu Drive/DSMZ/Cancer/patient_counts_processed/metadata_ptafr.tsv", header = TRUE, sep = "\t")
+
+positive_tumor <- metadata_ptafr %>%
+	filter(type == "Positive")
+
+negative_tumor <- metadata_ptafr %>%
+	filter(type == "Negative")
+
+tissues <- unique(metadata_ptafr$tissue)
+file_names <- paste0("cts.", tissues, ".tsv")
+positive_files <- positive_tumor$File.Name
+negative_files <- negative_tumor$File.Name
+positive_cts <- data.frame()
+negative_cts <- data.frame()
+
+# Export data files
+for (i in file_names) {
+	table <- read.delim(paste0("/Users/barbaradalmaso/Library/CloudStorage/GoogleDrive-barbdalmaso@gmail.com/Meu Drive/DSMZ/Cancer/patient_counts_processed/", i), header = TRUE, sep = "\t")
+	colnames(table) <- gsub("X", "", colnames(table))
+	colnames(table) <- gsub("\\.", "-", colnames(table))
+	selected_cols <- table %>%
+		select(matches(paste(negative_files, collapse = "|")))
+	if (nrow(negative_cts) == 0) {
+		negative_cts <- selected_cols
+	} else {
+		negative_cts <- dplyr::bind_cols(negative_cts, selected_cols)
+	}
+}
+
+for (i in file_names) {
+	table <- read.delim(paste0("/Users/barbaradalmaso/Library/CloudStorage/GoogleDrive-barbdalmaso@gmail.com/Meu Drive/DSMZ/Cancer/patient_counts_processed/", i), header = TRUE, sep = "\t")
+	colnames(table) <- gsub("X", "", colnames(table))
+	colnames(table) <- gsub("\\.", "-", colnames(table))
+	selected_cols <- table %>%
+		select(matches(paste(positive_files, collapse = "|")))
+	if (nrow(positive_cts) == 0) {
+		positive_cts <- selected_cols
+	} else {
+		positive_cts <- dplyr::bind_cols(positive_cts, selected_cols)
+	}
+}
+
+# Organize tables with gene ID as rownames and file.name as colnames
+table <- read.table("/Users/barbaradalmaso/Library/CloudStorage/GoogleDrive-barbdalmaso@gmail.com/Meu Drive/DSMZ/Cancer/05ea028e-6b8a-4352-88aa-057494cf5e80.rna_seq.augmented_star_gene_counts.tsv", header = T, sep ="\t", skip = 1)
+gene_annotation <- read.delim2("~/Downloads/GSE141531_PDE6B_retinal_organoid_ref_trans_full_table.txt", header = TRUE, sep ="\t", skip = 0, fill = TRUE)
+
+table <- table[,c(1:3)]
+gene_annotation <- gene_annotation[,c(1:2)]
+table <- subset(table, gene_type == "protein_coding")
+
+negative_cts <- as.matrix(negative_cts)
+positive_cts <- as.matrix(positive_cts)
+cts <- cbind(negative_cts, positive_cts)
+cts <- cts[, order(colnames(cts))]
+
+cts_gene <- cbind(table, cts)
+cts_gene <- merge(gene_annotation, cts_gene, by = "gene_name")
+cts_final <- as.matrix(cts_gene[,5:ncol(cts_gene)])
+rownames(cts_final) <- cts_gene$X.ID
+unique_genes <- unique(rownames(cts_final))
+cts_final <- cts_final[unique_genes,]
+
+# Create metadata
+cts_meta <- rbind(negative_tumor, positive_tumor)
+cts_meta <- cts_meta %>%
+	arrange(File.Name)
+rownames(cts_meta) <- colnames(cts)
+
+# Create ExpressionSet with cts files and metadata
+pheno_meta <- new("AnnotatedDataFrame", data = cts_meta)
+cts_set <- ExpressionSet(assayData = cts_final, phenoData = pheno_meta)
+
+bulk.control <- exprs(cts_set)[, cts_set$type == 'Negative']
+bulk.control <- apply(bulk.control,2, as.numeric)
+rownames(bulk.control) <- unique(cts_gene$X.ID)
+bulk.control <- as.matrix(bulk.control)
+
+bulk.case <- exprs(cts_set)[, cts_set$type == 'Positive']
+bulk.case <- apply(bulk.case,2, as.numeric)
+rownames(bulk.case) <- unique(cts_gene$X.ID)
+bulk.case <- as.matrix(bulk.case)
+
+
+# Link with singlecellexperiment data: https://cellxgene.cziscience.com/collections
+# I'm going to use https://www.nature.com/articles/s41586-023-06252-9 (Kumar et al 2023)
+sc.data <- readRDS("/Users/barbaradalmaso/Library/CloudStorage/GoogleDrive-barbdalmaso@gmail.com/Meu Drive/DSMZ/Cancer/immune_cells_scRNAseq.rds")
+sce <- as.SingleCellExperiment(sc.data, assay = NULL)
+set.seed(1234)
+# music2 deconvolution
+set.seed(1234)
+cells <- unique(sce$cell_type)
+
+positive_cells = music_prop(bulk.mtx = bulk.case, sc.sce = sce, clusters = 'cell_type',
+						 samples = 'biosample_id', 
+						 select.ct = cells, verbose = F)$Est.prop.weighted
+positive_cells <- data.frame(negative_cells)
+
+negative_cells =  music_prop(bulk.mtx = bulk.control, sc.sce = sce, clusters = 'cell_type',
+					    samples = 'biosample_id', 
+					    select.ct = cells, verbose = F)$Est.prop.weighted
+negative_cells <- data.frame(positive_cells)
+
+
